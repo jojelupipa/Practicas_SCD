@@ -1,0 +1,152 @@
+// -----------------------------------------------------------------------------
+//
+// Sistemas concurrentes y Distribuidos.
+// Práctica 2. Introducción a los monitores en C++11.
+//
+// archivo: fumadores.cpp
+//
+// Historial:
+// Creado en Noviembre de 2017
+// -----------------------------------------------------------------------------
+
+
+#include <iostream>
+#include <iomanip>
+#include <cassert>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <random>
+#include "HoareMonitor.hpp"
+using namespace HM;
+using namespace std;
+
+const int n_fumadores = 3;
+
+
+//**********************************************************************
+// plantilla de función para generar un entero aleatorio uniformemente
+// distribuido entre dos valores enteros, ambos incluidos
+// (ambos tienen que ser dos constantes, conocidas en tiempo de compilación)
+//----------------------------------------------------------------------
+
+template< int min, int max > int aleatorio()
+{
+  static default_random_engine generador( (random_device())() );
+  static uniform_int_distribution<int> distribucion_uniforme( min, max ) ;
+  return distribucion_uniforme( generador );
+}
+
+//-------------------------------------------------------------------------
+// Función que simula la acción de fumar, como un retardo aleatoria de la hebra
+
+void fumar( int num_fumador )
+{
+
+   // calcular milisegundos aleatorios de duración de la acción de fumar)
+   chrono::milliseconds duracion_fumar( aleatorio<20,200>() );
+
+   // informa de que comienza a fumar
+
+    cout << "Fumador " << num_fumador << "  :"
+          << " empieza a fumar (" << duracion_fumar.count() << " milisegundos)" << endl;
+
+   // espera bloqueada un tiempo igual a ''duracion_fumar' milisegundos
+   this_thread::sleep_for( duracion_fumar );
+
+   // informa de que ha terminado de fumar
+
+    cout << "Fumador " << num_fumador << "  : termina de fumar, comienza espera de ingrediente." << endl;
+
+}
+
+
+
+//**********************************************************************
+class MonitorFumadores : public HoareMonitor {
+private:
+  int ingrediente_listo;
+  CondVar c_fumadores[n_fumadores], c_estanquero;
+ public:
+   MonitorFumadores();
+   void PonerIngrediente(int ingrediente);
+   void CogerIngrediente(int ingrediente);
+   void EsperaEstanquero();
+} ;
+// -----------------------------------------------------------------------------
+
+
+MonitorFumadores::MonitorFumadores(){
+
+  ingrediente_listo = -1;
+
+  // Como queremos controlar el acceso  a los n_fumadores recursos y como cada
+  // fumador requiere un recurso tomamos ese número de colas
+  for(int i = 0; i < n_fumadores; i++)
+    c_fumadores[i] = newCondVar();
+
+  c_estanquero = newCondVar();
+}
+
+void MonitorFumadores::PonerIngrediente(int ingrediente){
+  ingrediente_listo = ingrediente;
+  c_fumadores[ingrediente].signal(); // Avisamos a la cola donde estén
+					// esperando al recurso producido
+}
+
+void MonitorFumadores::CogerIngrediente(int ingrediente){
+
+  // Esta hebra se ejecutará hasta aquí desde el primer momento,
+  // entonces nos interesa que si su ingrediente no está, que espere
+  // en la cola correspondiente y que el estanquero le avise una vez
+  // haya sido producido el ingrediente que necesite.
+  if(ingrediente_listo != ingrediente)
+    c_fumadores[ingrediente].wait();
+
+  // Posteriormente ponemos ingrediente a -1 y avisamos al estanquero
+  // para que produzca
+  
+  ingrediente_listo = -1;
+  c_estanquero.signal();
+}
+
+void MonitorFumadores::EsperaEstanquero(){
+  if(ingrediente_listo != -1)
+    c_estanquero.wait();
+}
+
+//------------------Fin-de-la-implementación-del-monitor----------------
+
+
+void funcion_hebra_fumador(MRef<MonitorFumadores> monitor, int id_fumador){
+  while(true){
+    monitor->CogerIngrediente(id_fumador);
+    fumar(id_fumador);
+  }
+}
+
+void funcion_hebra_estanquero(MRef<MonitorFumadores> monitor){
+  while(true){
+    int ingrediente_generado = aleatorio<0,n_fumadores-1>();
+    cout << "\tEl estanquero ha producido el ingrediente " << ingrediente_generado << endl;
+    monitor->PonerIngrediente(ingrediente_generado);
+    monitor->EsperaEstanquero();
+  }
+}
+
+int main(){
+
+  MRef<MonitorFumadores> monitor = Create<MonitorFumadores>();
+
+  thread fumadores[n_fumadores];
+  thread estanquero (funcion_hebra_estanquero,monitor);
+
+  for(int i = 0; i < n_fumadores; i++)
+    fumadores[i] = thread(funcion_hebra_fumador,monitor, i);
+
+  for(int i = 0; i < n_fumadores; i++)
+    fumadores[i].join();
+
+  estanquero.join();
+}
+  

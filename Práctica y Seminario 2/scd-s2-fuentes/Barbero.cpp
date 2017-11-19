@@ -1,0 +1,155 @@
+// -----------------------------------------------------------------------------
+//
+// Sistemas concurrentes y Distribuidos.
+// Práctica 2. Introducción a los monitores en C++11.
+//
+// archivo: Barbero.cpp
+//
+// Historial:
+// Creado en Noviembre de 2017 por Jesús Sánchez de Lechina Tejada.
+// Este código se puede encontrar de manera libre en
+// https://github.com/jojelupipa/Practicas_SCD
+// -----------------------------------------------------------------------------
+
+
+#include <iostream>
+#include <iomanip>
+#include <cassert>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <random>
+#include "HoareMonitor.hpp"
+using namespace HM;
+using namespace std;
+
+const int n_clientes = 5;
+
+//**********************************************************************
+// plantilla de función para generar un entero aleatorio uniformemente
+// distribuido entre dos valores enteros, ambos incluidos
+// (ambos tienen que ser dos constantes, conocidas en tiempo de compilación)
+//----------------------------------------------------------------------
+
+template< int min, int max > int aleatorio(){
+  static default_random_engine generador( (random_device())() );
+  static uniform_int_distribution<int> distribucion_uniforme( min, max ) ;
+  return distribucion_uniforme( generador );
+}
+
+void EsperaAleatoria(){
+   // calcular milisegundos aleatorios de duración de la espera
+   chrono::milliseconds espera( aleatorio<20,200>() );
+
+   // espera bloqueada un tiempo igual a ''espera' milisegundos
+   this_thread::sleep_for( espera );
+}
+
+
+void EsperaCliente(){
+  EsperaAleatoria();
+}
+void EsperaCortarPelo(){
+  EsperaAleatoria();
+}
+
+
+//------------------Definición-de-nuestro-monitor-------------------
+
+class MonitorBarbero : public HoareMonitor {
+private:
+  CondVar c_clientes, c_barbero, c_silla;
+  bool libre;
+
+ public:
+   MonitorBarbero ();
+   void CortarPelo(int cliente);
+   void SiguienteCliente();
+   void TerminarCliente();
+} ;
+
+
+
+MonitorBarbero::MonitorBarbero (){
+  libre = true;
+  c_clientes = newCondVar();
+  c_barbero = newCondVar();
+  c_silla = newCondVar();
+}
+
+void MonitorBarbero::CortarPelo(int cliente){
+  cout << "El cliente " << cliente << " ha entrado" << endl;
+
+  // Cuando el cliente entra y hay alguien sentado o algún cliente en
+  // la cola esperando este tiene que ponerse a la cola
+  if(!c_clientes.empty() || !libre){
+    c_clientes.wait();
+  }
+  // Una vez sale de la cola es porque la silla se ha quedado libre,
+  // entonces se sienta y avisa al barbero de que está listo.
+  libre = false;
+  c_barbero.signal();
+
+  cout << "El cliente " << cliente << " ha avisado al barbero y ha ocupado la silla" << endl;
+
+  c_silla.wait();
+  // Cuando el barbero le haya avisado el cliente podrá irse y
+  // desocupará la silla
+  cout << "El cliente " << cliente << " ha dejado la silla libre" << endl;
+}
+
+void MonitorBarbero::SiguienteCliente(){
+  // Si no hay clientes en la cola, el barbero duerme, en caso
+  // contrario se encarga de proceder con el siguiente cliente.
+  if(c_clientes.empty()){
+    cout << "\tNo hay nadie esperando, el barbero se duerme." << endl;
+    c_barbero.wait();
+  } else
+    c_clientes.signal();
+
+  cout << "\tEl barbero recibe al siguiente cliente" << endl;
+}
+
+
+void MonitorBarbero::TerminarCliente(){
+  cout << "\tEl barbero termina con el cliente" << endl;
+  libre = true;
+  c_silla.signal();
+}
+
+//--------------------Fin-de-la-implementación-del-monitor--------------
+
+
+// Funciones Hebras:
+
+void funcion_hebra_barbero(MRef<MonitorBarbero> monitor){
+  while(true){
+    monitor->SiguienteCliente();
+    EsperaCortarPelo();
+    monitor->TerminarCliente();
+  }
+}
+
+void funcion_hebra_cliente( MRef<MonitorBarbero> monitor, int cliente ){
+   while( true ){
+     monitor->CortarPelo(cliente);
+     EsperaCliente();
+   }
+}
+
+int main(){
+
+  MRef<MonitorBarbero> monitor = Create<MonitorBarbero>();
+
+  thread clientes[n_clientes];
+  thread barbero (funcion_hebra_barbero,monitor);
+
+  for(int i = 0; i < n_clientes; i++)
+    clientes[i] = thread(funcion_hebra_cliente,monitor, i);
+
+  for(int i = 0; i < n_clientes; i++)
+    clientes[i].join();
+
+  barbero.join();
+}
+

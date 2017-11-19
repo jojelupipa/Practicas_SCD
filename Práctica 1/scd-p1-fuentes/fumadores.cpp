@@ -1,0 +1,150 @@
+#include <iostream>
+#include <cassert>
+#include <thread>
+#include <mutex>
+#include <random> // dispositivos, generadores y distribuciones aleatorias
+#include <chrono> // duraciones (duration), unidades de tiempo
+#include "Semaphore.h"
+
+using namespace std ;
+using namespace SEM ;
+
+
+Semaphore sem_cero = Semaphore(0),
+  sem_uno = Semaphore(0),
+  sem_dos = Semaphore(0),
+  sem_estanco = Semaphore(1);
+
+int ingrediente;
+
+
+
+//**********************************************************************
+// plantilla de función para generar un entero aleatorio uniformemente
+// distribuido entre dos valores enteros, ambos incluidos
+// (ambos tienen que ser dos constantes, conocidas en tiempo de compilación)
+//----------------------------------------------------------------------
+
+template< int min, int max > int aleatorio()
+{
+  static default_random_engine generador( (random_device())() );
+  static uniform_int_distribution<int> distribucion_uniforme( min, max ) ;
+  return distribucion_uniforme( generador );
+}
+
+int Producir()
+{
+  cout << "La hebra estanquera está produciendo un ingrediente" << endl;
+  chrono::milliseconds duracion_producir( aleatorio<20,200>() );
+  this_thread::sleep_for( duracion_producir );
+  return aleatorio<0,2>();
+}
+
+//----------------------------------------------------------------------
+// función que ejecuta la hebra del estanquero
+
+void funcion_hebra_estanquero(  )
+{
+
+  while(true)
+    {
+      sem_estanco.sem_wait();
+      ingrediente = Producir();
+      cout << "Producido " << ingrediente << endl;
+      switch(ingrediente)
+	{
+	case 0:
+	  sem_cero.sem_signal();
+	  break;
+	case 1:
+	  sem_uno.sem_signal();
+	  break;
+	case 2:
+	  sem_dos.sem_signal();
+	  break;
+	default:
+	  cout << "Suceso imposible" << endl;
+	  break;
+	}
+    }
+}
+
+//-------------------------------------------------------------------------
+// Función que simula la acción de fumar, como un retardo aleatoria de la hebra
+
+void fumar( int num_fumador )
+{
+
+   // calcular milisegundos aleatorios de duración de la acción de fumar)
+  chrono::milliseconds duracion_fumar( aleatorio<20,200>() );//
+
+   // informa de que comienza a fumar
+
+    cout << "Fumador " << num_fumador << "  :"
+          << " empieza a fumar (" << duracion_fumar.count() << " milisegundos)" << endl;
+
+   // espera bloqueada un tiempo igual a ''duracion_fumar' milisegundos
+   this_thread::sleep_for( duracion_fumar );
+
+   // informa de que ha terminado de fumar
+
+    cout << "Fumador " << num_fumador << "  : termina de fumar, comienza espera de ingrediente." << endl;
+
+}
+
+//----------------------------------------------------------------------
+// función que ejecuta la hebra del fumador
+void  funcion_hebra_fumador( int num_fumador )
+{
+   while( true )
+   {
+     switch(num_fumador)
+       {
+       case 0:
+	 sem_cero.sem_wait();
+	 cout << "Hebra cero coge su ingrediente: 0" << endl;
+	 sem_estanco.sem_signal();
+	 fumar(num_fumador);
+	 break;
+       case 1:
+	 sem_uno.sem_wait();
+	 cout << "Hebra uno coge su ingrediente: 1" << endl;
+	 sem_estanco.sem_signal();
+	 fumar(num_fumador);
+	 break;
+       case 2:
+	 sem_dos.sem_wait();
+	 cout << "Hebra dos coge su ingrediente: 2" << endl;
+	 sem_estanco.sem_signal();
+	 fumar(num_fumador);
+	 break;
+       default:
+	 cout << "Suceso imposible" << endl;
+	 break;
+   }
+   }
+     
+}
+
+//----------------------------------------------------------------------
+
+int main()
+{
+  cout << "Problema de los fumadores" << endl;
+
+  thread hebra_estanquera(funcion_hebra_estanquero),
+    hebra_fumadora_cero(funcion_hebra_fumador, 0),
+    hebra_fumadora_uno(funcion_hebra_fumador,1),
+    hebra_fumadora_dos(funcion_hebra_fumador, 2);
+
+
+  // Al tratarse de bucles infinitos, este bloque nunca se ejecutará
+  hebra_estanquera.join();
+  hebra_fumadora_cero.join();
+  hebra_fumadora_uno.join();
+  hebra_fumadora_dos.join();
+
+
+  cout << "Fin (las hebras se han unido)" << endl;
+    
+}
