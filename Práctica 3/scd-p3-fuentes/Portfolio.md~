@@ -1,0 +1,477 @@
+---
+title: Práctica 3. Envío de Mensajes con MPI			# Título
+author: Jesús Sánchez de Lechina Tejada		# Nombre del autor
+header-includes:      	 	        	# Incluir paquetes en LaTeX
+toc: true                   			# Índice
+numbersections: false       			# Numeración de secciones mainfont: Arial monofont: Fira Mono
+fontsize: 11pt              			# Tamaño de fuente
+geometry: margin=1in        			# Tamaño de los márgenes
+---
+
+\newpage
+
+# Ejercicio 1. Múltiples productores y consumidores.
+
+## Cambios realizados
+
+Respecto al programa original, `prodcons2.cpp` se han realizado las
+siguientes modificaciones:
+
+* Se han añadido un conjunto de variables globales, constantes, que
+  indican el número de productores, consumidores, items, IDs que
+  pueden tomar productores/consumidores y buffer.
+  
+* En la función `main`, se han modificado las condiciones de
+  lanzamiento de hebras, ahora se lanzará una función
+  productora/consumidora por cada proceso que tenga el ID
+  correspondiente.
+  
+* En las funciones `funcion_productor` y `funcion_consumidor` se les
+  ha añadido un parámetro que corresponde con la ID (numero_orden).
+  
+* La función de producir ha sido modificada de modo que cada proceso
+  produzca un intervalo de valores comprendido entre el primer valor
+  correspondiente a su ID y el anterior al primer valor de la ID
+  siguiente, de tamaño num-items/num-procesos. Para esto se han
+  añadido una constante al ámbito global que indica el tamaño de estos
+  intervalos.
+  
+  
+* Para dar solución al problema de elegir un elemento aleatorio dentro
+  de un subconjunto de un comunicador, al no poder crear varios
+  comunicadores, usaremos la estrategia del establecimiento de
+  etiquetas. Para ello, en primer lugar crearemos las etiquetas
+  productor (1), consumidor (2) y buffer (3). Estas se nombrarán con
+  el prefijo `etiq_`.
+  
+  
+* Este último apartado nos lleva a realizar modificaciones en la
+  función del buffer. En primer lugar ahora no esperamos una ID en
+  concreto, sino que recibe el mensaje de cualquier fuente
+  (MPI_ANY_SOURCE) y, en función de la disponibilidad del buffer
+  selecciona qué etiquetas aceptará, si sólo las del consumidor,
+  productor, o cualquiera.
+  
+* A la hora de procesar el mensaje recibido en el paso anterior, en
+  caso de haber recibido el mensaje de un productor simplemente tiene
+  que almacenar el valor en su buffer, pero si es un consumidor debe
+  enviarle un mensaje con Ssend, para lo cual cambiaría el antiguo id
+  del consumidor por el MPI_SOURCE del estado. Además, el switch ya no
+  analiza el id del emisor, sino la etiqueta del estado.
+  
+\newpage
+
+## Código Fuente
+
+```c++
+
+// -----------------------------------------------------------------------------
+//
+// Sistemas concurrentes y Distribuidos.
+// Práctica 3. Implementación de algoritmos distribuidos con MPI
+//
+// Archivo: prodcons_multiples.cpp
+// Implementación del problema del productor-consumidor con
+// un proceso intermedio que gestiona un buffer finito y recibe peticiones
+// en orden arbitrario
+// (versión con múltiples productores y consumidores)
+//
+// -----------------------------------------------------------------------------
+
+#include <iostream>
+#include <thread> // this_thread::sleep_for
+#include <random> // dispositivos, generadores y distribuciones aleatorias
+#include <chrono> // duraciones (duration), unidades de tiempo
+#include <mpi.h>
+
+using namespace std;
+using namespace std::this_thread ;
+using namespace std::chrono ;
+
+const int
+  num_prods             = 4 ,
+  num_cons              = 5 ,
+  id_max_productor      = num_prods -1 ,
+  id_buffer             = num_prods ,
+  id_max_consumidor     = num_prods + 1 + num_cons -1 ,
+  num_procesos_esperado = 1+num_prods+num_cons ,
+  num_items             = num_prods * num_cons *2,
+  num_items_a_producir = num_items / num_prods,
+  num_items_a_consumir = num_items /num_cons,
+	// Debe ser múltiplo del número de prod y de consumidores 
+  tam_vector            = 20,
+  etiq_prod 		= 1,
+  etiq_cons		= 2,
+  etiq_buffer		= 3;
+
+//**********************************************************************
+// plantilla de función para generar un entero aleatorio uniformemente
+// distribuido entre dos valores enteros, ambos incluidos
+// (ambos tienen que ser dos constantes, conocidas en tiempo de compilación)
+//----------------------------------------------------------------------
+
+template< int min, int max > int aleatorio()
+{
+  static default_random_engine generador( (random_device())() );
+  static uniform_int_distribution<int> distribucion_uniforme( min, max ) ;
+  return distribucion_uniforme( generador );
+}
+// ---------------------------------------------------------------------
+// producir produce los numeros en secuencia (1,2,3,....)
+// y lleva espera aleatorio
+int producir(int id)
+{
+  static int contador = id* num_items_a_producir;
+  sleep_for( milliseconds( aleatorio<10,100>()) );
+  contador++ ;
+  cout << "Productor " << id << " ha producido valor " << contador << endl << flush;
+  return contador ;
+}
+// ---------------------------------------------------------------------
+
+void funcion_productor(int num_orden)
+{
+  for ( unsigned int i= 0 ; i < num_items_a_producir ; i++ )
+    {
+      // producir valor
+      int valor_prod = producir(num_orden);
+      // enviar valor
+      cout << "Productor " << num_orden << "  va a enviar valor " << valor_prod << endl << flush;
+      MPI_Ssend( &valor_prod, 1, MPI_INT, id_buffer, etiq_prod, MPI_COMM_WORLD );
+    }
+}
+// ---------------------------------------------------------------------
+
+void consumir( int valor_cons, int id )
+{
+  // espera bloqueada
+  sleep_for( milliseconds( aleatorio<110,200>()) );
+  cout << "\tConsumidor " << id << " ha consumido valor " << valor_cons << endl << flush ;
+}
+// ---------------------------------------------------------------------
+
+void funcion_consumidor(int num_orden)
+{
+  int         peticion,
+    valor_rec = 1 ;
+  MPI_Status  estado ;
+
+  for( unsigned int i=0 ; i < num_items_a_consumir; i++ )
+    {
+      MPI_Ssend( &peticion,  1, MPI_INT, id_buffer, etiq_cons, MPI_COMM_WORLD);
+      MPI_Recv ( &valor_rec, 1, MPI_INT, id_buffer, etiq_buffer, MPI_COMM_WORLD,&estado );
+      cout << "\tConsumidor " << num_orden << "  ha recibido valor " << valor_rec << endl << flush ;
+      consumir( valor_rec, num_orden );
+    }
+}
+// ---------------------------------------------------------------------
+
+void funcion_buffer()
+{
+  int        buffer[tam_vector],      // buffer con celdas ocupadas y vacías
+    valor,                   // valor recibido o enviado
+    primera_libre       = 0, // índice de primera celda libre
+    primera_ocupada     = 0, // índice de primera celda ocupada
+    num_celdas_ocupadas = 0, // número de celdas ocupadas
+    etiq_emisor_aceptable ;    // etiqueta de emisor aceptable
+  MPI_Status estado ;                 // metadatos del mensaje recibido
+
+  for( unsigned int i=0 ; i < num_items*2 ; i++ )
+    {
+      // 1. determinar si puede enviar solo prod., solo cons, o todos
+
+      if ( num_celdas_ocupadas == 0 )               // si buffer vacío
+	etiq_emisor_aceptable = etiq_prod ;       // $~~~$ solo prod.
+      else if ( num_celdas_ocupadas == tam_vector ) // si buffer lleno
+	etiq_emisor_aceptable = etiq_cons ;      // $~~~$ solo cons.
+      else                                          // si no vacío ni lleno
+	etiq_emisor_aceptable = MPI_ANY_TAG ;     // $~~~$ cualquiera
+
+      // 2. recibir un mensaje del emisor o emisores aceptables
+
+      MPI_Recv( &valor, 1, MPI_INT, MPI_ANY_SOURCE, etiq_emisor_aceptable, MPI_COMM_WORLD, &estado );
+
+      // 3. procesar el mensaje recibido
+
+      switch( estado.MPI_TAG ) // leer emisor del mensaje en metadatos
+	{
+	case etiq_prod: // si ha sido el productor: insertar en buffer
+	  buffer[primera_libre] = valor ;
+	  primera_libre = (primera_libre+1) % tam_vector ;
+	  num_celdas_ocupadas++ ;
+	  cout << "\t\tBuffer ha recibido valor " << valor << endl ;
+	  break;
+
+	case etiq_cons: // si ha sido el consumidor: extraer y enviarle
+	  valor = buffer[primera_ocupada] ;
+	  primera_ocupada = (primera_ocupada+1) % tam_vector ;
+	  num_celdas_ocupadas-- ;
+	  cout << "\t\tBuffer va a enviar valor " << valor << endl ;
+	  MPI_Ssend( &valor, 1, MPI_INT, estado.MPI_SOURCE, etiq_buffer, MPI_COMM_WORLD);
+	  break;
+	}
+    }
+}
+
+// ---------------------------------------------------------------------
+
+int main( int argc, char *argv[] )
+{
+  int id_propio, num_procesos_actual;
+
+  // inicializar MPI, leer identif. de proceso y número de procesos
+  MPI_Init( &argc, &argv );
+  MPI_Comm_rank( MPI_COMM_WORLD, &id_propio );
+  MPI_Comm_size( MPI_COMM_WORLD, &num_procesos_actual );
+
+  if ( num_procesos_esperado == num_procesos_actual )
+    {
+      // ejecutar la operación apropiada a 'id_propio'
+      if ( id_propio <= id_max_productor ) // Si está entre 0 y el id max 
+	funcion_productor(id_propio);
+      else if ( id_propio == id_buffer ) // Si coincide con el id del buffer
+	funcion_buffer();
+      else				 // En caso contrario se usa
+					 // el consumidor
+	funcion_consumidor(id_propio);
+    }
+  else
+    {
+      if ( id_propio == 0 ) // solo el primero escribe error, indep. del rol
+	{ cout << "el número de procesos esperados es:    " << num_procesos_esperado << endl
+	       << "el número de procesos en ejecución es: " << num_procesos_actual << endl
+	       << "(programa abortado)" << endl ;
+	}
+    }
+
+  // al terminar el proceso, finalizar MPI
+  MPI_Finalize( );
+  return 0;
+}
+```
+
+\newpage
+
+## Resultado ejecución
+
+Una salida del programa sigue el siguiente patrón:
+
+```
+Productor 2 ha producido valor 21
+Productor 2  va a enviar valor 21
+		Buffer ha recibido valor 21
+		Buffer va a enviar valor 21
+	Consumidor 9  ha recibido valor 21
+Productor 2 ha producido valor 22
+Productor 2  va a enviar valor 22
+		Buffer ha recibido valor 22
+		Buffer va a enviar valor 22
+	Consumidor 5  ha recibido valor 22
+Productor 3 ha producido valor 31
+Productor 3  va a enviar valor 31
+		Buffer ha recibido valor 31
+		Buffer va a enviar valor 31
+	Consumidor 7  ha recibido valor 31
+Productor 2 ha producido valor 23
+Productor 2  va a enviar valor 23
+		Buffer ha recibido valor 23
+		Buffer va a enviar valor 23
+	Consumidor 6  ha recibido valor 23
+Productor 0 ha producido valor 1
+Productor 0  va a enviar valor 1
+		Buffer ha recibido valor 1
+		Buffer va a enviar valor 1
+	Consumidor 8  ha recibido valor 1
+Productor 3 ha producido valor 32
+Productor 3  va a enviar valor 32
+		Buffer ha recibido valor 32
+Productor 1 ha producido valor 11
+Productor 1  va a enviar valor 11
+		Buffer ha recibido valor 11
+Productor 3 ha producido valor 33
+Productor 3  va a enviar valor 33
+		Buffer ha recibido valor 33
+Productor 0 ha producido valor 2
+Productor 0  va a enviar valor 2
+		Buffer ha recibido valor 2
+Productor 2 ha producido valor 24
+Productor 2  va a enviar valor 24
+		Buffer ha recibido valor 24
+Productor 2 ha producido valor 25
+Productor 2  va a enviar valor 25
+		Buffer ha recibido valor 25
+Productor 3 ha producido valor 34
+Productor 3  va a enviar valor 34
+		Buffer ha recibido valor 34
+		Buffer va a enviar valor 32
+	Consumidor 9 ha consumido valor 21
+	Consumidor 9  ha recibido valor 32
+```
+
+Esto quiere decir que cada proceso productor genera 10 valores que se
+envían al buffer. Este afirma haberlo recibido y envía dicho valor
+para que sea recibido y posteriormente consumido por un consumidor.
+
+\newpage
+
+# La cena filosofar. Solución con interbloqueo.
+
+## Especificaciones
+
+En primer lugar modificaremos la función de los filósofos, de manera
+que en cada iteración el filósofo requiera el tenedor de la izquierda
+y luego el de la derecha. Esto puede dar lugar a interbloqueo, pero lo
+solventaremos en la próxima solución. Posteriormente el filósofo come
+(espera aleatoria), suelta los tenedores y comienza a pensar (retraso
+aleatorio antes de comenzar la próxima iteración). Para ello
+enviaremos mensajes a los procesos tenedores síncronos con MPI_Ssend,
+pero necesitamos entonces un buffer auxiliar (aux, de tipo entero)
+cuyo valor no será relevante para el ejercicio pero será necesario
+para el paso de mensajes. Se enviará un mensaje a cada tenedor para
+solicitarlo, empezando siempre por el izquierdo, se realizará una
+espera, ahora se sueltan con un nuevo mensaje síncrono a los tenedores
+y se realiza una última espera aleatoria.
+
+Ahora continuaremos con la implementación de la función de los
+tenedores. Una vez más debemos hacer uso de un buffer auxiliar para el
+paso de mensajes. Y al comienzo de cada iteración el recurso se
+encuentra disponible, por lo que el tenedor esperará de manera
+síncrona a que el mensaje de petición del tenedor sea enviado. Puesto
+que puede recibir de cualquier filósofo su fuente será
+`MPI_ANY_SOURCE`. A continuación el tenedor muestra un mensaje
+informando de qué filósofo ha cogido el tenedor. Y por último espera
+el mensaje del filósofo que cogió el tenedor para que lo suelte e
+informa e ello con un mensaje.
+
+\newpage
+
+## Código fuente
+
+```c++
+// -----------------------------------------------------------------------------
+//
+// Sistemas concurrentes y Distribuidos.
+// Práctica 3. Implementación de algoritmos distribuidos con MPI
+//
+// Archivo: filosofos-interb.cpp
+// Implementación del problema de los filósofos (sin camarero).
+// 
+// -----------------------------------------------------------------------------
+
+
+#include <mpi.h>
+#include <thread> // this_thread::sleep_for
+#include <random> // dispositivos, generadores y distribuciones aleatorias
+#include <chrono> // duraciones (duration), unidades de tiempo
+#include <iostream>
+
+using namespace std;
+using namespace std::this_thread ;
+using namespace std::chrono ;
+
+const int
+   num_filosofos = 5 ,
+   num_procesos  = 2*num_filosofos ;
+
+
+//**********************************************************************
+// plantilla de función para generar un entero aleatorio uniformemente
+// distribuido entre dos valores enteros, ambos incluidos
+// (ambos tienen que ser dos constantes, conocidas en tiempo de compilación)
+//----------------------------------------------------------------------
+
+template< int min, int max > int aleatorio()
+{
+  static default_random_engine generador( (random_device())() );
+  static uniform_int_distribution<int> distribucion_uniforme( min, max ) ;
+  return distribucion_uniforme( generador );
+}
+
+// ---------------------------------------------------------------------
+
+void funcion_filosofos( int id )
+{
+  int id_ten_izq = (id+1)              % num_procesos, //id. tenedor izq.
+      id_ten_der = (id+num_procesos-1) % num_procesos; //id. tenedor der.
+
+  int aux = 0; // No es usado, pero es necesario algún buffer para transmitir los mensajes
+  while ( true )
+    {
+      cout <<"Filósofo " <<id << " solicita ten. izq." <<id_ten_izq <<endl;
+      MPI_Ssend( &aux, 1, MPI_INT, id_ten_izq, 0, MPI_COMM_WORLD);
+
+      cout <<"Filósofo " <<id <<" solicita ten. der." <<id_ten_der <<endl;
+      MPI_Ssend( &aux, 1, MPI_INT, id_ten_der, 0, MPI_COMM_WORLD);
+
+      cout <<"Filósofo " <<id <<" comienza a comer" <<endl ;
+      sleep_for( milliseconds( aleatorio<10,100>() ) );
+
+      cout <<"Filósofo " <<id <<" suelta ten. izq. " <<id_ten_izq <<endl;
+      MPI_Ssend( &aux, 1, MPI_INT, id_ten_izq, 0, MPI_COMM_WORLD);
+
+      cout<< "Filósofo " <<id <<" suelta ten. der. " <<id_ten_der <<endl;
+      MPI_Ssend( &aux, 1, MPI_INT, id_ten_der, 0, MPI_COMM_WORLD);
+
+      cout << "Filosofo " << id << " comienza a pensar" << endl;
+      sleep_for( milliseconds( aleatorio<10,100>() ) );
+
+ }
+}
+// ---------------------------------------------------------------------
+
+void funcion_tenedores( int id )
+{
+  int valor, id_filosofo ;  // valor recibido, identificador del filósofo
+  MPI_Status estado ;       // metadatos de las dos recepciones
+
+  int aux;
+  while ( true )
+  {
+    MPI_Recv(&aux,1,MPI_INT,MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &estado);
+    id_filosofo = estado.MPI_SOURCE;
+    cout <<"Ten. " <<id <<" ha sido cogido por filo. " <<id_filosofo <<endl;
+
+    MPI_Recv(&aux, 1, MPI_INT, id_filosofo, 0, MPI_COMM_WORLD, &estado);
+    // ...... recibir liberación de filósofo 'id_filosofo' (completar)
+    cout <<"Ten. "<< id<< " ha sido liberado por filo. " <<id_filosofo <<endl ;
+  }
+}
+// ---------------------------------------------------------------------
+
+int main( int argc, char** argv )
+{
+   int id_propio, num_procesos_actual ;
+
+   MPI_Init( &argc, &argv );
+   MPI_Comm_rank( MPI_COMM_WORLD, &id_propio );
+   MPI_Comm_size( MPI_COMM_WORLD, &num_procesos_actual );
+
+
+   if ( num_procesos == num_procesos_actual )
+   {
+      // ejecutar la función correspondiente a 'id_propio'
+      if ( id_propio % 2 == 0 )          // si es par
+         funcion_filosofos( id_propio ); //   es un filósofo
+      else                               // si es impar
+         funcion_tenedores( id_propio ); //   es un tenedor
+   }
+   else
+   {
+      if ( id_propio == 0 ) // solo el primero escribe error, indep. del rol
+      { cout << "el número de procesos esperados es:    " << num_procesos << endl
+             << "el número de procesos en ejecución es: " << num_procesos_actual << endl
+             << "(programa abortado)" << endl ;
+      }
+   }
+
+   MPI_Finalize( );
+   return 0;
+}
+
+// ---------------------------------------------------------------------
+```
+
+
+
+
+
